@@ -35,6 +35,7 @@ scipy==1.15.2
 six==1.17.0
 smmap==5.0.2
 streamlit==1.44.1
+streamlit-autorefresh==1.0.1
 streamlit-geolocation==0.0.10
 streamlit-js-eval==0.1.7
 streamlit_folium==0.24.0
