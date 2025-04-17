@@ -94,22 +94,19 @@ allow_live_tracking = st.checkbox(
 refresh_location = st.button("🔄 Refresh Location")
 
 if allow_live_tracking:
-    location = streamlit_geolocation()
-    
-    if refresh_location or (location and location.get("latitude") and location.get("longitude")):
-        location = streamlit_geolocation()
-        if location and location.get("latitude") and location.get("longitude"):
-            st.session_state['user_lat'] = location.get("latitude")
-            st.session_state['user_lon'] = location.get("longitude")
-            st.session_state['location_allowed'] = True
-            st.success(f"📍 Location updated! ({st.session_state['user_lat']}, {st.session_state['user_lon']})")
-        else:
-            st.warning("⚠️ Unable to retrieve location. Ensure browser permissions are granted and retry.")
-    elif st.session_state['user_lat'] and st.session_state['user_lon']:
-        st.info(f"📍 Current Location: {st.session_state['user_lat']}, {st.session_state['user_lon']}")
-    else:
-        st.info("📡 Waiting for browser location permission...")
+    # Use different keys to avoid duplicate element error
+    geo_key = "refreshed_geo" if refresh_location else "initial_geo"
+    location = streamlit_geolocation(key=geo_key)
 
+    if location and location.get("latitude") and location.get("longitude"):
+        st.session_state['user_lat'] = location.get("latitude")
+        st.session_state['user_lon'] = location.get("longitude")
+        st.session_state['location_allowed'] = True
+        st.success(f"📍 Location updated! ({st.session_state['user_lat']}, {st.session_state['user_lon']})")
+    elif not st.session_state['user_lat'] or not st.session_state['user_lon']:
+        st.info("📡 Waiting for browser location permission...")
+    else:
+        st.info(f"📍 Using previously captured location: ({st.session_state['user_lat']}, {st.session_state['user_lon']})")
 else:
     st.session_state['location_allowed'] = False
     st.session_state['user_lat'] = None
@@ -158,7 +155,11 @@ if grms_enabled:
 # ========== MAP ==========
 st.subheader("Geographic Map")
 
-m = folium.Map(location=[st.session_state['user_lat'] or 40.7128, st.session_state['user_lon'] or -74.0060], zoom_start=12)
+default_location = [40.7128, -74.0060]
+user_location = [st.session_state['user_lat'], st.session_state['user_lon']] if st.session_state['user_lat'] and st.session_state['user_lon'] else default_location
+zoom = 12 if st.session_state['user_lat'] else 5
+
+m = folium.Map(location=user_location, zoom_start=zoom)
 
 # Add DTN markers
 for _, row in dtn_df.iterrows():
@@ -174,7 +175,7 @@ if st.session_state['user_lat'] and st.session_state['user_lon']:
 
 st_folium(m, width=1200, key='main_map')
 
-# Tables
+# ========== TABLES ==========
 st.subheader("Filtered DTN Data")
 st.dataframe(dtn_df)
 
