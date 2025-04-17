@@ -84,42 +84,41 @@ if 'user_lat' not in st.session_state:
 if 'user_lon' not in st.session_state:
     st.session_state['user_lon'] = None
 
-# ========== LOCATION TRACKING ==========
-allow_live_tracking = st.checkbox(
-    "Allow live location tracking",
-    value=st.session_state['location_allowed'],
-    help="Enable this to fetch your live location from your browser."
-)
+# ========== LOCATION TRACKING w/ REFRESH ==========
+st.subheader("Live Location")
+# put the checkbox and button side by side
+col1, col2 = st.columns([4,1])
+with col1:
+    allow_live = st.checkbox(
+        "Allow live location tracking",
+        value=st.session_state['location_allowed'],
+        help="Enable this to fetch your live location from your browser."
+    )
+with col2:
+    refresh_clicked = st.button("🔄")
 
-if allow_live_tracking:
+# Decide whether we need to call the geolocation component
+if allow_live or refresh_clicked:
     location = streamlit_geolocation()
     if location and location.get("latitude") and location.get("longitude"):
         st.session_state['user_lat'] = location["latitude"]
         st.session_state['user_lon'] = location["longitude"]
         st.session_state['location_allowed'] = True
-        st.success("📍 Location captured successfully!")
-    elif not st.session_state['location_allowed']:
-        st.info("📡 Waiting for browser location permission...")
+        if refresh_clicked:
+            st.success("🔄 Location refreshed!")
+        else:
+            st.success("📍 Location captured!")
+    else:
+        st.info("📡 Waiting for browser permission or unable to fetch location.")
 else:
+    # if user turned off live-tracking, clear out
     st.session_state['location_allowed'] = False
     st.session_state['user_lat'] = None
     st.session_state['user_lon'] = None
 
-# ─── REFRESH BUTTON ────────────────────────────────────────
-if st.button("🔄 Refresh Location"):
-    location = streamlit_geolocation()
-    if location and location.get("latitude") and location.get("longitude"):
-        st.session_state['user_lat'] = location["latitude"]
-        st.session_state['user_lon'] = location["longitude"]
-        st.session_state['location_allowed'] = True
-        st.success("🔄 Location refreshed!")
-    else:
-        st.error("Could not retrieve location. Please allow browser permission.")
-
 # ========== GRMS ==========
 threshold_table = pd.DataFrame()
 grms_df = pd.DataFrame()
-
 grms_enabled = st.checkbox("Enable GRMS Data")
 
 if grms_enabled:
@@ -133,46 +132,42 @@ if grms_enabled:
             if grms_df[col].dtype in [np.float64, np.int64]
         ]
         if available_channels:
-            default_channel = next((col for col in available_channels if "Gage" in col), available_channels[0])
-            selected_channels = st.multiselect("Choose up to 3 channels", available_channels, default=[default_channel])
-            selected_channels = selected_channels[:3]
+            default_channel = next((c for c in available_channels if "Gage" in c), available_channels[0])
+            selected_channels = st.multiselect("Choose up to 3 channels", available_channels, default=[default_channel])[:3]
 
             center_mp = None
-            if 'Latitude' in grms_df.columns and 'Longitude' in grms_df.columns and 'MP' in grms_df.columns:
+            if all(k in grms_df.columns for k in ("Latitude","Longitude","MP")) and \
+               st.session_state['user_lat'] and st.session_state['user_lon']:
                 coords = list(zip(grms_df['Latitude'], grms_df['Longitude']))
-                tree = KDTree(coords)
-                if st.session_state['user_lat'] and st.session_state['user_lon']:
-                    dist, idx = tree.query([st.session_state['user_lat'], st.session_state['user_lon']])
-                    center_mp = grms_df.iloc[idx]['MP']
+                idx = KDTree(coords).query([st.session_state['user_lat'], st.session_state['user_lon']])[1]
+                center_mp = grms_df.iloc[idx]['MP']
 
-            auto_scroll = st.checkbox("Auto-scroll Line Graph to My Location", value=False)
-            recenter_btn = st.button("Recenter Graph Around Me")
+            auto_scroll = st.checkbox("Auto‑scroll Line Graph", value=False)
+            recenter_btn = st.button("Recenter Graph")
 
             fig = go.Figure()
             for col in selected_channels:
                 fig.add_trace(go.Scatter(x=grms_df['MP'], y=grms_df[col], mode='lines', name=col))
             fig.update_layout(title="GRMS Channels", xaxis_title="MP", yaxis_title="Value", height=400)
-
             if (auto_scroll or recenter_btn) and center_mp is not None:
-                fig.update_xaxes(range=[center_mp - 0.05, center_mp + 0.05])
-
+                fig.update_xaxes(range=[center_mp-0.05, center_mp+0.05])
             st.plotly_chart(fig, use_container_width=True)
 
             st.markdown("### Threshold Filters")
             for col in selected_channels:
-                col_abs = st.checkbox(f"Use absolute value for {col}?", value=True)
-                greater_than = st.number_input(f"{col} > ", value=1e10)
-                less_than = st.number_input(f"{col} < ", value=-1e10)
-                col_data = grms_df[col].abs() if col_abs else grms_df[col]
-                match = grms_df[(col_data > greater_than) | (col_data < less_than)].copy()
-                match['Flagged Channel'] = col
-                threshold_table = pd.concat([threshold_table, match])
+                use_abs = st.checkbox(f"Use absolute for {col}?", value=True)
+                gt = st.number_input(f"{col} >", value=1e10)
+                lt = st.number_input(f"{col} <", value=-1e10)
+                data_series = grms_df[col].abs() if use_abs else grms_df[col]
+                flagged = grms_df[(data_series>gt)|(data_series<lt)].copy()
+                flagged['Flagged Channel'] = col
+                threshold_table = pd.concat([threshold_table, flagged])
 
 # ========== MAP ==========
 st.subheader("Geographic Map")
-
 m = folium.Map(location=[40.7128, -74.0060], zoom_start=5)
 
+# center on user if available
 if st.session_state['user_lat'] and st.session_state['user_lon']:
     m.location = [st.session_state['user_lat'], st.session_state['user_lon']]
     m.zoom_start = 12
@@ -180,51 +175,27 @@ elif not dtn_df.empty:
     m.location = [dtn_df['Latitude'].mean(), dtn_df['Longitude'].mean()]
     m.zoom_start = 8
 
-# Add DTN markers
-for _, row in dtn_df.iterrows():
-    folium.CircleMarker(
-        location=(row['Latitude'], row['Longitude']),
-        radius=5,
-        color='green',
-        popup=vertical_popup(row)
-    ).add_to(m)
-
-# Add TEC markers
-for _, row in tec_df.iterrows():
-    folium.CircleMarker(
-        location=(row['Latitude'], row['Longitude']),
-        radius=5,
-        color='blue',
-        popup=vertical_popup(row)
-    ).add_to(m)
-
-# Add GRMS threshold markers
+# DTN, TEC, GRMS and user‐marker
+for _, r in dtn_df.iterrows():
+    folium.CircleMarker((r['Latitude'], r['Longitude']), radius=5, color='green',
+                        popup=vertical_popup(r)).add_to(m)
+for _, r in tec_df.iterrows():
+    folium.CircleMarker((r['Latitude'], r['Longitude']), radius=5, color='blue',
+                        popup=vertical_popup(r)).add_to(m)
 if not threshold_table.empty:
-    for _, row in threshold_table.iterrows():
-        folium.Marker(
-            location=(row['Latitude'], row['Longitude']),
-            popup=vertical_popup(row),
-            icon=folium.Icon(color="red")
-        ).add_to(m)
-
-# Add user location marker
+    for _, r in threshold_table.iterrows():
+        folium.Marker((r['Latitude'], r['Longitude']),
+                      popup=vertical_popup(r),
+                      icon=folium.Icon(color="red")).add_to(m)
 if st.session_state['user_lat'] and st.session_state['user_lon']:
-    folium.CircleMarker(
-        location=[st.session_state['user_lat'], st.session_state['user_lon']],
-        radius=8,
-        color='#FF0000',
-        fill=True,
-        fill_color='#FF0000',
-        popup="Your Live Location",
-        z_index_offset=1000
-    ).add_to(m)
+    folium.CircleMarker([st.session_state['user_lat'], st.session_state['user_lon']],
+                        radius=8, color='#F00', fill=True, fill_color='#F00',
+                        popup="You", z_index_offset=1000).add_to(m)
 
-# Show the map
 st_folium(m, width=1200, key='main_map')
 
 # ========== TABLES ==========
 st.subheader("Filtered DTN Data")
 st.dataframe(dtn_df)
-
 st.subheader("Filtered TEC Data")
 st.dataframe(tec_df)
