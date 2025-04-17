@@ -93,11 +93,19 @@ allow_live_tracking = st.checkbox(
 
 refresh_location = st.button("🔄 Refresh Location")
 
-if allow_live_tracking:
-    # Use different keys to avoid duplicate element error
-    geo_key = "refreshed_geo" if refresh_location else "initial_geo"
-    location = streamlit_geolocation(key=geo_key)
+location = None
+if allow_live_tracking and refresh_location:
+    location = streamlit_geolocation(
+        key="refreshed_geo",
+        default={"latitude": None, "longitude": None}
+    )
+elif allow_live_tracking:
+    location = streamlit_geolocation(
+        key="initial_geo",
+        default={"latitude": None, "longitude": None}
+    )
 
+if allow_live_tracking:
     if location and location.get("latitude") and location.get("longitude"):
         st.session_state['user_lat'] = location.get("latitude")
         st.session_state['user_lon'] = location.get("longitude")
