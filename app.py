@@ -87,19 +87,29 @@ if 'user_lon' not in st.session_state:
 # ========== LOCATION TRACKING ==========
 allow_live_tracking = st.checkbox(
     "Allow live location tracking",
-    value=st.session_state['location_allowed'],
+    value=st.session_state.get('location_allowed', False),
     help="Enable this to fetch your live location from your browser."
 )
 
+refresh_location = st.button("🔄 Refresh Location")
+
 if allow_live_tracking:
     location = streamlit_geolocation()
-    if location and location.get("latitude") and location.get("longitude"):
-        st.session_state['user_lat'] = location.get("latitude")
-        st.session_state['user_lon'] = location.get("longitude")
-        st.session_state['location_allowed'] = True
-        st.success("📍 Location captured successfully!")
-    elif not st.session_state['location_allowed']:
+    
+    if refresh_location or (location and location.get("latitude") and location.get("longitude")):
+        location = streamlit_geolocation()
+        if location and location.get("latitude") and location.get("longitude"):
+            st.session_state['user_lat'] = location.get("latitude")
+            st.session_state['user_lon'] = location.get("longitude")
+            st.session_state['location_allowed'] = True
+            st.success(f"📍 Location updated! ({st.session_state['user_lat']}, {st.session_state['user_lon']})")
+        else:
+            st.warning("⚠️ Unable to retrieve location. Ensure browser permissions are granted and retry.")
+    elif st.session_state['user_lat'] and st.session_state['user_lon']:
+        st.info(f"📍 Current Location: {st.session_state['user_lat']}, {st.session_state['user_lon']}")
+    else:
         st.info("📡 Waiting for browser location permission...")
+
 else:
     st.session_state['location_allowed'] = False
     st.session_state['user_lat'] = None
@@ -126,13 +136,12 @@ if grms_enabled:
             selected_channels = st.multiselect("Choose up to 3 channels", available_channels, default=[default_channel])
             selected_channels = selected_channels[:3]
 
+            coords = list(zip(grms_df['Latitude'], grms_df['Longitude']))
+            tree = KDTree(coords)
             center_mp = None
-            if 'Latitude' in grms_df.columns and 'Longitude' in grms_df.columns and 'MP' in grms_df.columns:
-                coords = list(zip(grms_df['Latitude'], grms_df['Longitude']))
-                tree = KDTree(coords)
-                if st.session_state['user_lat'] and st.session_state['user_lon']:
-                    dist, idx = tree.query([st.session_state['user_lat'], st.session_state['user_lon']])
-                    center_mp = grms_df.iloc[idx]['MP']
+            if st.session_state['user_lat'] and st.session_state['user_lon']:
+                dist, idx = tree.query([st.session_state['user_lat'], st.session_state['user_lon']])
+                center_mp = grms_df.iloc[idx]['MP']
 
             auto_scroll = st.checkbox("Auto-scroll Line Graph to My Location", value=False)
             recenter_btn = st.button("Recenter Graph Around Me")
@@ -140,34 +149,16 @@ if grms_enabled:
             fig = go.Figure()
             for col in selected_channels:
                 fig.add_trace(go.Scatter(x=grms_df['MP'], y=grms_df[col], mode='lines', name=col))
-            fig.update_layout(title="GRMS Channels", xaxis_title="MP", yaxis_title="Value", height=400)
-
-            if (auto_scroll or recenter_btn) and center_mp is not None:
+            if (auto_scroll or recenter_btn) and center_mp:
                 fig.update_xaxes(range=[center_mp - 0.05, center_mp + 0.05])
 
+            fig.update_layout(title="GRMS Channels", xaxis_title="MP", yaxis_title="Value", height=400)
             st.plotly_chart(fig, use_container_width=True)
-
-            st.markdown("### Threshold Filters")
-            for col in selected_channels:
-                col_abs = st.checkbox(f"Use absolute value for {col}?", value=True)
-                greater_than = st.number_input(f"{col} > ", value=1e10)
-                less_than = st.number_input(f"{col} < ", value=-1e10)
-                col_data = grms_df[col].abs() if col_abs else grms_df[col]
-                match = grms_df[(col_data > greater_than) | (col_data < less_than)].copy()
-                match['Flagged Channel'] = col
-                threshold_table = pd.concat([threshold_table, match])
 
 # ========== MAP ==========
 st.subheader("Geographic Map")
 
-m = folium.Map(location=[40.7128, -74.0060], zoom_start=5)
-
-if st.session_state['user_lat'] and st.session_state['user_lon']:
-    m.location = [st.session_state['user_lat'], st.session_state['user_lon']]
-    m.zoom_start = 12
-elif not dtn_df.empty:
-    m.location = [dtn_df['Latitude'].mean(), dtn_df['Longitude'].mean()]
-    m.zoom_start = 8
+m = folium.Map(location=[st.session_state['user_lat'] or 40.7128, st.session_state['user_lon'] or -74.0060], zoom_start=12)
 
 # Add DTN markers
 for _, row in dtn_df.iterrows():
@@ -177,19 +168,13 @@ for _, row in dtn_df.iterrows():
 for _, row in tec_df.iterrows():
     folium.CircleMarker(location=(row['Latitude'], row['Longitude']), radius=5, color='blue', popup=vertical_popup(row)).add_to(m)
 
-# Add GRMS threshold markers
-if not threshold_table.empty:
-    for _, row in threshold_table.iterrows():
-        folium.Marker(location=(row['Latitude'], row['Longitude']), popup=vertical_popup(row), icon=folium.Icon(color="red")).add_to(m)
-
 # Add user location marker
 if st.session_state['user_lat'] and st.session_state['user_lon']:
-    folium.CircleMarker(location=[st.session_state['user_lat'], st.session_state['user_lon']], radius=8, color='#FF0000', fill=True, fill_color='#FF0000', popup="Your Live Location", z_index_offset=1000).add_to(m)
+    folium.Marker([st.session_state['user_lat'], st.session_state['user_lon']], popup="Your Location", icon=folium.Icon(color='red')).add_to(m)
 
-# Show the map
 st_folium(m, width=1200, key='main_map')
 
-# ========== TABLES ==========
+# Tables
 st.subheader("Filtered DTN Data")
 st.dataframe(dtn_df)
 
