@@ -6,184 +6,168 @@ import os
 from scipy.spatial import KDTree
 import folium
 from streamlit_folium import st_folium
-from streamlit_geolocation import streamlit_geolocation  
+from streamlit_geolocation import streamlit_geolocation
 
-# ========== CONFIG ==========
+# ---------------- CONFIG ----------------
 st.set_page_config(layout="wide")
 st.title("Track Condition Dashboard")
 
-# ========== VERTICAL POPUP ==========
-def vertical_popup(row):
+# ---------------- HELPERS ----------------
+def vertical_popup(row: pd.Series) -> folium.Popup:
     html = "<table style='font-size:12px;'>"
     for key, value in row.items():
         html += f"<tr><th align='left'>{key}</th><td>{value}</td></tr>"
     html += "</table>"
     return folium.Popup(html, max_width=400)
 
-# ========== FILE LOADERS ==========
 @st.cache_data
-def load_dtn(subdivision):
+def load_dtn(sub):
     df = pd.read_csv("dataset/dtn.csv")
-    return df[df['Subdivision'] == subdivision]
+    return df[df["Subdivision"] == sub]
 
 @st.cache_data
-def load_tec(subdivision):
+def load_tec(sub):
     df = pd.read_csv("dataset/tec.csv")
-    return df[df['Subdivision'] == subdivision]
+    return df[df["Subdivision"] == sub]
 
 @st.cache_data
-def load_grms_file(filepath):
+def load_grms_file(path):
     try:
-        chunks = pd.read_csv(filepath, chunksize=50000)
-        df = pd.concat(chunks)
-        df.columns = [col.strip() for col in df.columns]
-        required_cols = ["# Milepost", "Milepost Feet", "Latitude", "Longitude"]
-        missing = [col for col in required_cols if col not in df.columns]
+        df = pd.concat(pd.read_csv(path, chunksize=50_000))
+        df.columns = [c.strip() for c in df.columns]
+        req = ["# Milepost", "Milepost Feet", "Latitude", "Longitude"]
+        missing = [c for c in req if c not in df.columns]
         if missing:
-            st.error(f"Missing columns in {os.path.basename(filepath)}: {', '.join(missing)}")
+            st.error(f"Missing columns in {os.path.basename(path)}: {', '.join(missing)}")
             return pd.DataFrame()
         df["# Milepost"] = pd.to_numeric(df["# Milepost"], errors="coerce")
         df["Milepost Feet"] = pd.to_numeric(df["Milepost Feet"], errors="coerce")
-        df = df.dropna(subset=["# Milepost", "Milepost Feet", "Latitude", "Longitude"])
+        df = df.dropna(subset=req)
         df["MP"] = df["# Milepost"] + df["Milepost Feet"] / 5280
-        if len(df) > 100000:
-            df = df.iloc[::5]
+        if len(df) > 100_000:
+            df = df.iloc[::5]         # thin large file for speed
         return df
     except Exception as e:
-        st.error(f"Error reading GRMS file: {e}")
+        st.error(f"GRMS load error: {e}")
         return pd.DataFrame()
 
-# ========== GLOBAL FILTERS ==========
+# ---------------- GLOBAL FILTERS ----------------
 st.subheader("Global Filters")
 dtn_raw = pd.read_csv("dataset/dtn.csv")
-subdivision = st.selectbox("Choose Subdivision", options=dtn_raw['Subdivision'].dropna().unique())
+subdivision = st.selectbox("Choose Subdivision", dtn_raw["Subdivision"].dropna().unique())
 date_range = st.date_input("Optional: Date Range", [])
 
-# ========== LOAD DATA ==========
+# ---------------- DATA LOAD ----------------
 dtn_df = load_dtn(subdivision)
 tec_df = load_tec(subdivision)
 
-# ========== SIDEBAR FILTERS ==========
+# ---------------- SIDEBAR ----------------
 st.sidebar.title("Refine Filters")
-status_filter = st.sidebar.multiselect("DTN Status", options=dtn_df['Status'].dropna().unique())
-severity_filter = st.sidebar.multiselect("TEC Severity", options=tec_df['Severity'].dropna().unique())
-user_review_filter = st.sidebar.multiselect("User Review Status", options=tec_df['User Review Status'].dropna().unique())
+status_filter  = st.sidebar.multiselect("DTN Status",  dtn_df["Status"].dropna().unique())
+severity_filter= st.sidebar.multiselect("TEC Severity",tec_df["Severity"].dropna().unique())
+user_review_filter = st.sidebar.multiselect("User Review Status",
+                                           tec_df["User Review Status"].dropna().unique())
 
 if status_filter:
-    dtn_df = dtn_df[dtn_df['Status'].isin(status_filter)]
+    dtn_df = dtn_df[dtn_df["Status"].isin(status_filter)]
 if severity_filter:
-    tec_df = tec_df[tec_df['Severity'].isin(severity_filter)]
+    tec_df = tec_df[tec_df["Severity"].isin(severity_filter)]
 if user_review_filter:
-    tec_df = tec_df[tec_df['User Review Status'].isin(user_review_filter)]
+    tec_df = tec_df[tec_df["User Review Status"].isin(user_review_filter)]
 
-# ========== SESSION STATE ==========
-if 'location_allowed' not in st.session_state:
-    st.session_state['location_allowed'] = False
-if 'user_lat' not in st.session_state:
-    st.session_state['user_lat'] = None
-if 'user_lon' not in st.session_state:
-    st.session_state['user_lon'] = None
+# ---------------- SESSION DEFAULTS ----------------
+for k, v in {"location_allowed": False,
+             "user_lat": None,
+             "user_lon": None,
+             "geo_counter": 0}.items():
+    st.session_state.setdefault(k, v)
 
-# ========== LOCATION TRACKING ==========
+# ---------------- LOCATION TRACKING ----------------
 allow_live_tracking = st.checkbox(
     "Allow live location tracking",
-    value=st.session_state.get('location_allowed', False),
+    value=st.session_state["location_allowed"],
     help="Enable this to fetch your live location from your browser."
 )
 
-refresh_location = st.button("🔄 Refresh Location")
+if allow_live_tracking and st.button("🔄 Refresh Location"):
+    st.session_state["geo_counter"] += 1    # force a new key on each click
 
 location = None
-if allow_live_tracking and refresh_location:
-    location = streamlit_geolocation(
-        key="refreshed_geo",
-        default={"latitude": None, "longitude": None}
-    )
-elif allow_live_tracking:
-    location = streamlit_geolocation(
-        key="initial_geo",
-        default={"latitude": None, "longitude": None}
-    )
-
 if allow_live_tracking:
-    if location and location.get("latitude") and location.get("longitude"):
-        st.session_state['user_lat'] = location.get("latitude")
-        st.session_state['user_lon'] = location.get("longitude")
-        st.session_state['location_allowed'] = True
-        st.success(f"📍 Location updated! ({st.session_state['user_lat']}, {st.session_state['user_lon']})")
-    elif not st.session_state['user_lat'] or not st.session_state['user_lon']:
-        st.info("📡 Waiting for browser location permission...")
-    else:
-        st.info(f"📍 Using previously captured location: ({st.session_state['user_lat']}, {st.session_state['user_lon']})")
-else:
-    st.session_state['location_allowed'] = False
-    st.session_state['user_lat'] = None
-    st.session_state['user_lon'] = None
+    # each run uses same key unless user clicked refresh
+    geo_key = f"geo_{st.session_state['geo_counter']}"
+    location = streamlit_geolocation(key=geo_key)
 
-# ========== GRMS ==========
+if allow_live_tracking and location and location.get("latitude") and location.get("longitude"):
+    st.session_state["user_lat"] = location["latitude"]
+    st.session_state["user_lon"] = location["longitude"]
+    st.session_state["location_allowed"] = True
+    st.success(f"📍  Location updated! ({location['latitude']:.5f}, "
+               f"{location['longitude']:.5f})")
+elif allow_live_tracking and not (st.session_state["user_lat"] and st.session_state["user_lon"]):
+    st.info("📡 Waiting for browser location permission...")
+elif not allow_live_tracking:
+    st.session_state.update({"location_allowed": False, "user_lat": None, "user_lon": None})
+
+# ---------------- GRMS SECTION ----------------
 threshold_table = pd.DataFrame()
 grms_df = pd.DataFrame()
 
-grms_enabled = st.checkbox("Enable GRMS Data")
+if st.checkbox("Enable GRMS Data"):
+    grms_files = sorted(f for f in os.listdir("tecfiles") if f.endswith(".csv"))
+    if grms_files:
+        selected_file = st.selectbox("Choose GRMS File", grms_files)
+        grms_df = load_grms_file(os.path.join("tecfiles", selected_file))
 
-if grms_enabled:
-    grms_files = sorted([f for f in os.listdir("tecfiles") if f.endswith(".csv")])
-    selected_file = st.selectbox("Choose GRMS File", grms_files)
-    grms_df = load_grms_file(os.path.join("tecfiles", selected_file))
+        if not grms_df.empty and "MP" in grms_df.columns:
+            num_cols = [c for c in grms_df.columns if grms_df[c].dtype in (np.float64, np.int64)]
+            default_channel = next((c for c in num_cols if "Gage" in c), num_cols[0] if num_cols else None)
+            chosen = st.multiselect("Choose up to 3 channels", num_cols, default=[default_channel] if default_channel else [])
+            chosen = chosen[:3]
 
-    if not grms_df.empty and "MP" in grms_df.columns:
-        available_channels = [
-            col for col in grms_df.columns
-            if grms_df[col].dtype in [np.float64, np.int64]
-        ]
-        if available_channels:
-            default_channel = next((col for col in available_channels if "Gage" in col), available_channels[0])
-            selected_channels = st.multiselect("Choose up to 3 channels", available_channels, default=[default_channel])
-            selected_channels = selected_channels[:3]
-
-            coords = list(zip(grms_df['Latitude'], grms_df['Longitude']))
-            tree = KDTree(coords)
+            # find closest MP to user
             center_mp = None
-            if st.session_state['user_lat'] and st.session_state['user_lon']:
-                dist, idx = tree.query([st.session_state['user_lat'], st.session_state['user_lon']])
-                center_mp = grms_df.iloc[idx]['MP']
+            if st.session_state["user_lat"] and st.session_state["user_lon"]:
+                tree = KDTree(list(zip(grms_df["Latitude"], grms_df["Longitude"])))
+                _, idx = tree.query([st.session_state["user_lat"], st.session_state["user_lon"]])
+                center_mp = grms_df.iloc[idx]["MP"]
 
-            auto_scroll = st.checkbox("Auto-scroll Line Graph to My Location", value=False)
+            auto_scroll = st.checkbox("Auto‑scroll line graph to my location")
             recenter_btn = st.button("Recenter Graph Around Me")
 
             fig = go.Figure()
-            for col in selected_channels:
-                fig.add_trace(go.Scatter(x=grms_df['MP'], y=grms_df[col], mode='lines', name=col))
-            if (auto_scroll or recenter_btn) and center_mp:
+            for col in chosen:
+                fig.add_trace(go.Scatter(x=grms_df["MP"], y=grms_df[col],
+                                         mode="lines", name=col))
+            if (auto_scroll or recenter_btn) and center_mp is not None:
                 fig.update_xaxes(range=[center_mp - 0.05, center_mp + 0.05])
 
-            fig.update_layout(title="GRMS Channels", xaxis_title="MP", yaxis_title="Value", height=400)
+            fig.update_layout(title="GRMS Channels",
+                              xaxis_title="MP", yaxis_title="Value", height=400)
             st.plotly_chart(fig, use_container_width=True)
 
-# ========== MAP ==========
+# ---------------- MAP ----------------
 st.subheader("Geographic Map")
 
-default_location = [40.7128, -74.0060]
-user_location = [st.session_state['user_lat'], st.session_state['user_lon']] if st.session_state['user_lat'] and st.session_state['user_lon'] else default_location
-zoom = 12 if st.session_state['user_lat'] else 5
+start_loc = ([st.session_state["user_lat"], st.session_state["user_lon"]]
+             if st.session_state["user_lat"] and st.session_state["user_lon"]
+             else [40.7128, -74.0060])
+zoom_start = 12 if st.session_state["user_lat"] else 5
+m = folium.Map(location=start_loc, zoom_start=zoom_start)
 
-m = folium.Map(location=user_location, zoom_start=zoom)
+for _, r in dtn_df.iterrows():
+    folium.CircleMarker((r["Latitude"], r["Longitude"]), radius=5,
+                        color="green", popup=vertical_popup(r)).add_to(m)
+for _, r in tec_df.iterrows():
+    folium.CircleMarker((r["Latitude"], r["Longitude"]), radius=5,
+                        color="blue", popup=vertical_popup(r)).add_to(m)
+if st.session_state["user_lat"] and st.session_state["user_lon"]:
+    folium.Marker([st.session_state["user_lat"], st.session_state["user_lon"]],
+                  popup="Your Location", icon=folium.Icon(color="red")).add_to(m)
 
-# Add DTN markers
-for _, row in dtn_df.iterrows():
-    folium.CircleMarker(location=(row['Latitude'], row['Longitude']), radius=5, color='green', popup=vertical_popup(row)).add_to(m)
+st_folium(m, width=1200, key="main_map")
 
-# Add TEC markers
-for _, row in tec_df.iterrows():
-    folium.CircleMarker(location=(row['Latitude'], row['Longitude']), radius=5, color='blue', popup=vertical_popup(row)).add_to(m)
-
-# Add user location marker
-if st.session_state['user_lat'] and st.session_state['user_lon']:
-    folium.Marker([st.session_state['user_lat'], st.session_state['user_lon']], popup="Your Location", icon=folium.Icon(color='red')).add_to(m)
-
-st_folium(m, width=1200, key='main_map')
-
-# ========== TABLES ==========
+# ---------------- TABLES ----------------
 st.subheader("Filtered DTN Data")
 st.dataframe(dtn_df)
 
